@@ -1,0 +1,21 @@
+src/ogdf/layered/ExtendedNestingGraph.cpp
+  s_5244f572dbd640::t_3c223e2a8759ef 49-50,52,1070,1075-1076,1186-1195,1197-1198,1200-1238,1243,1249-1250,1254,1263-1264,1268,1270,1275-1278,1283,1291-1301
+src/ogdf/lpsolver/LPSolver.cpp
+  s_5244f572dbd640::t_8324bf61097e9c 41-44,170-173,175-176,178-181
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c523ce32b5555f7b26c5cb9ccb4209ab3a8e6dcd",
+  "prompts": {},
+  "sessions": {
+    "s_5244f572dbd640": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3ca614ae-ed10-4838-92c3-3bead74ad7de",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Bryan Nguyen <thanhbinh01234@gmail.com>"
+    }
+  }
+}
