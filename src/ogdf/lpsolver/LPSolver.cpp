@@ -38,6 +38,10 @@
 
 #include <ogdf/external/coin.h>
 
+#include <coin/CoinPackedMatrix.hpp>
+
+#include <vector>
+
 #include <iostream>
 
 namespace ogdf {
@@ -163,18 +167,18 @@ LPSolver::Status LPSolver::optimize(
 
 	int i;
 
-	CoinPackedVector zero;
-	for (i = 0; i < numRows; ++i) {
-		osi->addRow(zero, equationSense[i], rightHandSide[i], 0);
-	}
+	// Load the whole problem at once: adding rows one by one makes Clp resize its model for every
+	// row, which is quadratic in the number of rows.
+	std::vector<CoinBigIndex> colStart(numCols);
+	std::vector<int> colLength(numCols);
 	for (int colNo = 0; colNo < numCols; ++colNo) {
-		CoinPackedVector cpv;
-		for (i = matrixBegin[colNo]; i < matrixBegin[colNo] + matrixCount[colNo]; ++i) {
-			cpv.insert(matrixIndex[i], matrixValue[i]);
-		}
-		osi->addCol(cpv, lowerBound[colNo], upperBound[colNo], obj[colNo]);
+		colStart[colNo] = matrixBegin[colNo];
+		colLength[colNo] = matrixCount[colNo];
 	}
-
+	CoinPackedMatrix matrix(true, numRows, numCols, matrixIndex.size(), matrixValue.begin(),
+			matrixIndex.begin(), colStart.data(), colLength.data(), 0.0, 0.0);
+	osi->loadProblem(matrix, lowerBound.begin(), upperBound.begin(), obj.begin(), equationSense.begin(),
+			rightHandSide.begin(), nullptr);
 
 	osi->initialSolve();
 

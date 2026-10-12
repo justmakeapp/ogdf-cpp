@@ -46,7 +46,10 @@
 #include <ogdf/layered/ExtendedNestingGraph.h>
 #include <ogdf/layered/OptimalRanking.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <limits>
+#include <vector>
 #include <ostream>
 #include <tuple>
 #include <utility>
@@ -1064,13 +1067,13 @@ RCCrossings ExtendedNestingGraph::reduceCrossings(int i, bool dirTopDown) {
 struct RCEdge {
 	RCEdge() { }
 
-	RCEdge(node src, node tgt, RCCrossings cr, RCCrossings crReverse)
+	RCEdge(int src, int tgt, RCCrossings cr, RCCrossings crReverse)
 		: m_src(src), m_tgt(tgt), m_cr(cr), m_crReverse(crReverse) { }
 
 	RCCrossings weight() const { return m_crReverse - m_cr; }
 
-	node m_src;
-	node m_tgt;
+	int m_src;
+	int m_tgt;
 	RCCrossings m_cr;
 	RCCrossings m_crReverse;
 };
@@ -1180,34 +1183,75 @@ RCCrossings ExtendedNestingGraph::reduceCrossings(LHTreeNode* cNode, bool dirTop
 	}
 
 
-	Graph G; // crossing reduction graph
-	NodeArray<int> level(G, -1);
-	m_aeVisited.init(G, false);
-	m_auxDeg.init(G, 0);
-
-	// create nodes
-	NodeArray<LHTreeNode*> fromG(G);
-	Array<node> toG(n);
-
+	// The crossing reduction graph is kept only as its reflexive transitive closure, as bitsets:
+	// desc[j] holds the children reachable from child j, anc[j] the children that reach j. This
+	// makes the acyclicity test for every candidate location relationship O(1) instead of a BFS
+	// over a dense graph, and every pair ends up ordered, so the final position of j is simply its
+	// number of ancestors.
+	const int words = (n + 63) / 64;
+	std::vector<uint64_t> desc(static_cast<size_t>(n) * words, 0), anc(static_cast<size_t>(n) * words, 0);
+	auto bitSet = [words](const std::vector<uint64_t>& m, int i, int b) {
+		return (m[static_cast<size_t>(i) * words + (b >> 6)] >> (b & 63)) & 1u;
+	};
 	for (j = 0; j < n; ++j) {
-		fromG[toG[j] = G.newNode()] = cNode->child(j);
+		desc[static_cast<size_t>(j) * words + (j >> 6)] |= uint64_t(1) << (j & 63);
+		anc[static_cast<size_t>(j) * words + (j >> 6)] |= uint64_t(1) << (j & 63);
 	}
+	std::vector<uint64_t> newAnc(words), newDesc(words);
+	auto tryEdgeClosure = [&](int u, int v) {
+		if (bitSet(desc, v, u)) {
+			return false; // v already reaches u: u -> v would close a cycle
+		}
+		if (bitSet(desc, u, v)) {
+			return true; // already implied
+		}
+		const uint64_t* descU = &desc[static_cast<size_t>(u) * words];
+		const uint64_t* descV = &desc[static_cast<size_t>(v) * words];
+		const uint64_t* ancU = &anc[static_cast<size_t>(u) * words];
+		const uint64_t* ancV = &anc[static_cast<size_t>(v) * words];
+		// Only ancestors of u that do not reach v yet, and descendants of v not reached by u yet,
+		// gain anything; the others already contain the respective closure. Snapshot both sets
+		// before updating, since the updates below modify desc[u] and anc[v].
+		for (int w = 0; w < words; ++w) {
+			newAnc[w] = ancU[w] & ~ancV[w];
+			newDesc[w] = descV[w] & ~descU[w];
+		}
+		for (int w = 0; w < words; ++w) {
+			for (uint64_t bits = newAnc[w]; bits != 0; bits &= bits - 1) {
+				const int a = (w << 6) + __builtin_ctzll(bits);
+				uint64_t* descA = &desc[static_cast<size_t>(a) * words];
+				for (int x = 0; x < words; ++x) {
+					descA[x] |= newDesc[x];
+				}
+			}
+		}
+		for (int w = 0; w < words; ++w) {
+			for (uint64_t bits = newDesc[w]; bits != 0; bits &= bits - 1) {
+				const int d = (w << 6) + __builtin_ctzll(bits);
+				uint64_t* ancD = &anc[static_cast<size_t>(d) * words];
+				for (int x = 0; x < words; ++x) {
+					ancD[x] |= newAnc[x];
+				}
+			}
+		}
+		return true;
+	};
 
 	// create edges for l-r constraints
 	const LHTreeNode* neighbourParent = (dirTopDown) ? cNode->up() : cNode->down();
 	if (neighbourParent != nullptr) {
-		node src = nullptr;
+		int src = -1;
 		for (int i = 0; i < neighbourParent->numberOfChildren(); ++i) {
 			const LHTreeNode* vNode = (dirTopDown) ? neighbourParent->child(i)->down()
 												   : neighbourParent->child(i)->up();
 
 			if (vNode != nullptr) {
-				node tgt = toG[vNode->pos()];
-				if (src != nullptr) {
+				int tgt = vNode->pos();
+				if (src >= 0) {
 #ifdef OGDF_DEBUG
 					bool result =
 #endif
-							tryEdge(src, tgt, G, level);
+							tryEdgeClosure(src, tgt);
 					OGDF_ASSERT(result);
 				}
 				src = tgt;
@@ -1216,28 +1260,27 @@ RCCrossings ExtendedNestingGraph::reduceCrossings(LHTreeNode* cNode, bool dirTop
 	}
 
 	// list of location relationships
-	List<RCEdge> edgeList;
+	std::vector<RCEdge> edgeList;
+	edgeList.reserve(static_cast<size_t>(n) * (n - 1) / 2);
 	for (j = 0; j < n; ++j) {
 		for (int k = j + 1; k < n; ++k) {
 			if (cn(j, k) <= cn(k, j)) {
-				edgeList.pushBack(RCEdge(toG[j], toG[k], cn(j, k), cn(k, j)));
+				edgeList.emplace_back(j, k, cn(j, k), cn(k, j));
 			} else {
-				edgeList.pushBack(RCEdge(toG[k], toG[j], cn(k, j), cn(j, k)));
+				edgeList.emplace_back(k, j, cn(k, j), cn(j, k));
 			}
 		}
 	}
 
-	// sort list according to weights
-	LocationRelationshipComparer cmp;
-	edgeList.quicksort(cmp);
+	// sort list according to weights (largest gain first; ties keep index order)
+	std::stable_sort(edgeList.begin(), edgeList.end(), [](const RCEdge& x, const RCEdge& y) {
+		return LocationRelationshipComparer::compare(x, y) < 0;
+	});
 
 	// build acyclic graph
 	RCCrossings numCrossings;
 	for (const RCEdge& rce : edgeList) {
-		node u = rce.m_src;
-		node v = rce.m_tgt;
-
-		if (tryEdge(u, v, G, level)) {
+		if (tryEdgeClosure(rce.m_src, rce.m_tgt)) {
 			numCrossings += rce.m_cr;
 
 		} else {
@@ -1245,14 +1288,17 @@ RCCrossings ExtendedNestingGraph::reduceCrossings(LHTreeNode* cNode, bool dirTop
 		}
 	}
 
-	OGDF_ASSERT(isAcyclic(G));
-
-	// sort nodes in G topological
-	topologicalNumbering(G, level);
-
-	// sort children of cNode according to topological numbering
-	for (node v : G.nodes) {
-		cNode->setChild(level[v], fromG[v]);
+	// sort children of cNode according to the (total) order in the closure
+	Array<LHTreeNode*> children(n);
+	for (j = 0; j < n; ++j) {
+		children[j] = cNode->child(j);
+	}
+	for (j = 0; j < n; ++j) {
+		int pos = -1; // anc[j] contains j itself
+		for (int w = 0; w < words; ++w) {
+			pos += __builtin_popcountll(anc[static_cast<size_t>(j) * words + w]);
+		}
+		cNode->setChild(pos, children[j]);
 	}
 
 #if 0
